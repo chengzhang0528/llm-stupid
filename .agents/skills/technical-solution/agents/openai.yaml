@@ -1,0 +1,7 @@
+interface:
+  display_name: "Technical Solution"
+  short_description: "Plan requested solutions and authorized technical changes"
+  default_prompt: "Use $technical-solution to prepare the requested solution or controlled implementation plan, preserve established direction and requirement provenance, and complete already authorized implementation without a separate approval round."
+
+policy:
+  allow_implicit_invocation: true

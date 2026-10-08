@@ -1,0 +1,75 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Granite 3.1：一个 token 怎样生成",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "prompt-prefill",
+        "label": "输入与 Prefill",
+        "focus": ["request", "encode", "embedding", "prefill", "cache", "head"],
+        "note": "一次处理整个提示词，建立 24 层的历史 K/V，并从最后提示位置得到首个 token 的分数。"
+      },
+      {
+        "id": "decode-loop",
+        "label": "逐 token Decode",
+        "focus": ["cache", "decode", "head", "sampler", "append"],
+        "note": "每轮只算新末尾位置，复用历史 K/V，采样一个 ID，再判断是否继续。"
+      },
+      {
+        "id": "stream-stop",
+        "label": "输出与停止",
+        "focus": ["sampler", "append", "output"],
+        "note": "所选 token ID 增量解码为文本；EOS、长度上限或停止串结束循环。"
+      }
+    ]
+  },
+  "lanes": [
+    { "id": "inference", "label": "从消息到流式 Token" }
+  ],
+  "phases": [
+    { "id": "prompt-phase", "label": "对话编码与 Embedding", "fromCol": 0, "toCol": 2 },
+    { "id": "token-phase", "label": "Prefill + Decode", "fromCol": 3, "toCol": 5, "variant": "emphasis" }
+  ],
+  "groups": [
+    { "id": "repeated-decoder", "label": "24 层 Decode", "lane": "inference", "fromCol": 3, "toCol": 4, "variant": "emphasis" }
+  ],
+  "mainPath": ["request", "encode", "embedding", "prefill", "head", "sampler", "append", "output"],
+  "nodes": [
+    { "id": "request", "lane": "inference", "col": 0, "type": "external", "label": "对话消息", "sublabel": "system / user", "width": 150 },
+    { "id": "encode", "lane": "inference", "col": 1, "type": "backend", "label": "Chat Template + Tokenizer", "sublabel": "文本 → input_ids", "width": 172 },
+    { "id": "embedding", "lane": "inference", "col": 2, "type": "backend", "label": "Embedding 查表", "sublabel": "ID → 1024 维向量", "width": 150 },
+    { "id": "prefill", "lane": "inference", "col": 3, "type": "backend", "label": "Prefill · 24 层", "sublabel": "所有提示位置；因果遮罩", "width": 170, "height": 100 },
+    { "id": "head", "lane": "inference", "col": 4, "type": "backend", "label": "Final RMSNorm + LM Head", "sublabel": "末位 hidden → 49,155 logits", "width": 184, "height": 100 },
+    { "id": "cache", "lane": "inference", "col": 4, "type": "database", "label": "KV Cache", "sublabel": "Prefill 写入；保存各层历史 K/V", "width": 186, "yOffset": 110 },
+    { "id": "decode", "lane": "inference", "col": 3, "type": "backend", "label": "新 Token Decode · 24 层", "sublabel": "只算末尾位置；读历史，追加当前 K/V", "width": 196, "height": 100, "yOffset": 110 },
+    { "id": "sampler", "lane": "inference", "col": 5, "type": "backend", "label": "采样器", "sublabel": "49,155 分数 → 选一个 ID", "width": 150 },
+    { "id": "append", "lane": "inference", "col": 5, "type": "security", "label": "追加 / 停止判断", "sublabel": "EOS · max_new_tokens · 停止串", "width": 174, "yOffset": 120 },
+    { "id": "output", "lane": "inference", "col": 5, "type": "frontend", "label": "Tokenizer 解码 / 流式输出", "sublabel": "累计 ID → 可见文本片段", "width": 174, "yOffset": 230 }
+  ],
+  "edges": [
+    { "id": "messages-template", "from": "request", "to": "encode", "label": "消息", "variant": "default", "role": "main" },
+    { "id": "encoded-ids", "from": "encode", "to": "embedding", "label": "IDs", "variant": "default", "role": "main" },
+    { "id": "embedded-prompt", "from": "embedding", "to": "prefill", "variant": "default", "role": "main" },
+    { "id": "first-logits", "from": "prefill", "to": "head", "variant": "emphasis", "role": "main" },
+    { "id": "cache-update", "from": "decode", "to": "cache", "variant": "dashed", "role": "branch", "fromSide": "right", "toSide": "left" },
+    { "id": "candidate-scores", "from": "head", "to": "sampler", "variant": "default", "role": "main" },
+    { "id": "selected-id", "from": "sampler", "to": "append", "variant": "emphasis", "role": "main" },
+    { "id": "stream-text", "from": "append", "to": "output", "variant": "default", "role": "main" },
+    { "id": "continue-generation", "from": "append", "to": "decode", "label": "未停止：刚选 ID 进入下一轮", "variant": "dashed", "role": "return", "route": "bottom-channel", "fromSide": "bottom", "toSide": "bottom" }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Granite 3.1 A400M：单层内部计算",
+      "items": [
+        "RMSNorm → Q/K/V；RoPE 作用于 Q、K；GQA 用 16 个 Q 头、8 个 KV 头，对历史与当前 K 做注意力，再加权汇总 V 并走残差。",
+        "RMSNorm → Router 从 32 个专家选 Top-8；每个被选专家执行 SwiGLU，再按路由权重合并并走残差；随后依赖上一层结果进入下一层。",
+        "最后一层后执行 RMSNorm 与共享 LM Head，产出 49,155 个分数；采样器按运行参数只挑一个 ID，不是把全部分数当作已生成 token。",
+        "Token ID 是离散编号，hidden 是向量，logits 是分数，输出文字是解码结果；当前 llama-bench -p 0 -n 10 基线只测短程 decode 吞吐。"
+      ]
+    }
+  ]
+}
